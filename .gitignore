@@ -6,3 +6,4 @@ outputs/
 dist/
 *.egg-info/
 /data
+/tests

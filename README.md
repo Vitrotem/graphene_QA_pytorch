@@ -40,12 +40,15 @@ Reads from `data/raw/`, writes numbered crops to `data/processed/`. Use `--force
 train
 eval
 predict path/to/image.jpg
+predict path/to/folder/
 ```
 
 Training and evaluation load crops from `data/processed/` (held-out split is automatic). Prediction preprocesses each input image and saves classified crops under `outputs/predictions/<image_stem>/{class}/`.
+
+Passing a folder quantifies every image in it and writes `prediction_stats.csv` into that folder (counts and percentages per class, plus a TOTAL row). Use `--csv NAME` to rename the report, or `--no-csv` to skip it.
 
 ## How it works
 
 1. **preprocess** — detect circles, crop, mask, normalize → `data/processed/`
 2. **train / eval** — load crops, resize, classify (stratified train/test split)
-3. **predict** — extract circles from a new image, classify each, report counts
+3. **predict** — extract circles from a new image or folder, classify each, report counts (and CSV for folders)

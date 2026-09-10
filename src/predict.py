@@ -1,6 +1,7 @@
-"""Run inference on one or more TEM grid images."""
+"""Run inference on TEM grid images and optionally quantify a folder to CSV."""
 
 import argparse
+import csv
 from collections import Counter
 from pathlib import Path
 
@@ -9,10 +10,12 @@ import torch
 from PIL import Image
 
 from src.constants import CLASS_NAMES
-from src.dataset import build_transforms
+from src.dataset import IMAGE_EXTENSIONS, build_transforms
 from src.device import resolve_device
 from src.model import create_model
 from src.preprocessing import CircleCrop, extract_circle_crops, render_classified_overlay
+
+DEFAULT_CSV_NAME = "prediction_stats.csv"
 
 
 def coalesce_image_paths(parts: list[str]) -> list[Path]:
@@ -32,6 +35,46 @@ def coalesce_image_paths(parts: list[str]) -> list[Path]:
             paths.append(Path(" ".join(parts[i:])))
             break
     return paths
+
+
+def collect_images(paths: list[Path]) -> list[Path]:
+    """Expand files and directories into a sorted list of image paths."""
+    images: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            images.extend(
+                sorted(
+                    p
+                    for p in path.iterdir()
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                )
+            )
+        elif path.is_file():
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                raise ValueError(f"Unsupported image type: {path}")
+            images.append(path)
+        else:
+            raise FileNotFoundError(f"Path not found: {path}")
+    # Preserve order but drop duplicates
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for image in images:
+        resolved = image.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(image)
+    return unique
+
+
+def resolve_csv_path(
+    input_paths: list[Path],
+    output_dir: Path,
+    csv_name: str,
+) -> Path:
+    """Write the report into a quantified folder when that is the sole input."""
+    if len(input_paths) == 1 and input_paths[0].is_dir():
+        return input_paths[0] / csv_name
+    return output_dir / csv_name
 
 
 def load_predictor(checkpoint_path: Path, device: torch.device):
@@ -98,12 +141,73 @@ def predict_image(
     return len(crops), dict(counts), overlay_path
 
 
+def build_stats_row(
+    image_path: Path,
+    num_circles: int,
+    counts: dict[str, int],
+    status: str = "ok",
+    error: str = "",
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "image": image_path.name,
+        "path": str(image_path),
+        "status": status,
+        "circles_detected": num_circles,
+    }
+    for class_name in sorted(CLASS_NAMES):
+        count = counts.get(class_name, 0)
+        pct = (count / num_circles) * 100 if num_circles else 0.0
+        row[class_name] = count
+        row[f"{class_name}_pct"] = round(pct, 2)
+    row["error"] = error
+    return row
+
+
+def write_stats_csv(rows: list[dict[str, object]], csv_path: Path) -> None:
+    if not rows:
+        return
+
+    fieldnames = list(rows[0].keys())
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerows(rows)
+
+        totals = Counter()
+        ok_rows = [row for row in rows if row["status"] == "ok"]
+        for row in ok_rows:
+            totals["circles_detected"] += int(row["circles_detected"])
+            for class_name in sorted(CLASS_NAMES):
+                totals[class_name] += int(row[class_name])
+
+        total_circles = totals["circles_detected"]
+        summary: dict[str, object] = {
+            "image": "TOTAL",
+            "path": "",
+            "status": "summary",
+            "circles_detected": total_circles,
+            "error": "",
+        }
+        for class_name in sorted(CLASS_NAMES):
+            count = totals[class_name]
+            pct = (count / total_circles) * 100 if total_circles else 0.0
+            summary[class_name] = count
+            summary[f"{class_name}_pct"] = round(pct, 2)
+        writer.writerow(summary)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Predict graphene on TEM images")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Predict graphene on TEM images. Pass image files and/or a folder; "
+            "folder quantification writes a CSV stats report into that folder."
+        )
+    )
     parser.add_argument(
-        "images",
+        "paths",
         nargs="+",
-        help="One or more image paths (quote paths that contain spaces)",
+        help="Image file(s) and/or a folder of images (quote paths that contain spaces)",
     )
     parser.add_argument(
         "--checkpoint", type=Path, default=Path("outputs/best_model.pt")
@@ -113,6 +217,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/predictions"),
         help="Directory for preprocessed crops and color overlay (default: outputs/predictions)",
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=DEFAULT_CSV_NAME,
+        help=f"CSV report filename (default: {DEFAULT_CSV_NAME})",
+    )
+    parser.add_argument(
+        "--no-csv",
+        action="store_true",
+        help="Skip writing the CSV stats report",
     )
     parser.add_argument(
         "--device",
@@ -131,18 +246,40 @@ def main() -> None:
     if not args.checkpoint.exists():
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
 
-    model, transform, idx_to_class = load_predictor(args.checkpoint, device)
+    input_paths = coalesce_image_paths(args.paths)
+    image_paths = collect_images(input_paths)
+    if not image_paths:
+        raise FileNotFoundError("No images found in the given path(s)")
 
-    for image_path in coalesce_image_paths(args.images):
+    model, transform, idx_to_class = load_predictor(args.checkpoint, device)
+    rows: list[dict[str, object]] = []
+
+    for image_path in image_paths:
         image_output_dir = args.output_dir / image_path.stem
-        num_circles, counts, overlay_path = predict_image(
-            model,
-            transform,
-            device,
-            idx_to_class,
-            image_path,
-            output_dir=image_output_dir,
-        )
+        try:
+            num_circles, counts, overlay_path = predict_image(
+                model,
+                transform,
+                device,
+                idx_to_class,
+                image_path,
+                output_dir=image_output_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep batch quantification running
+            print(f"\n{image_path}")
+            print(f"  ERROR: {exc}")
+            rows.append(
+                build_stats_row(
+                    image_path,
+                    num_circles=0,
+                    counts={},
+                    status="error",
+                    error=str(exc),
+                )
+            )
+            continue
+
+        rows.append(build_stats_row(image_path, num_circles, counts))
         print(f"\n{image_path}")
         print(f"  circles detected: {num_circles}")
         for class_name in sorted(CLASS_NAMES):
@@ -152,6 +289,11 @@ def main() -> None:
         print(f"  crops saved to: {image_output_dir}/{{class}}/")
         if overlay_path is not None:
             print(f"  color overlay: {overlay_path}")
+
+    if not args.no_csv:
+        csv_path = resolve_csv_path(input_paths, args.output_dir, args.csv)
+        write_stats_csv(rows, csv_path)
+        print(f"\nCSV report: {csv_path}")
 
 
 if __name__ == "__main__":
