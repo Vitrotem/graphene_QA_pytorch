@@ -1,8 +1,7 @@
 .venv/
 __pycache__/
 *.py[cod]
-outputs/predictions
-*.pt
+outputs/predictions/
 dist/
 *.egg-info/
 /data
