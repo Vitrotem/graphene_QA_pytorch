@@ -66,17 +66,6 @@ def collect_images(paths: list[Path]) -> list[Path]:
     return unique
 
 
-def resolve_csv_path(
-    input_paths: list[Path],
-    output_dir: Path,
-    csv_name: str,
-) -> Path:
-    """Write the report into a quantified folder when that is the sole input."""
-    if len(input_paths) == 1 and input_paths[0].is_dir():
-        return input_paths[0] / csv_name
-    return output_dir / csv_name
-
-
 def load_predictor(checkpoint_path: Path, device: torch.device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     class_to_idx: dict[str, int] = checkpoint["class_to_idx"]
@@ -216,7 +205,10 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("outputs/predictions"),
-        help="Directory for preprocessed crops and color overlay (default: outputs/predictions)",
+        help=(
+            "Directory for crops/overlays when predicting image files "
+            "(ignored for folder mode; default: outputs/predictions)"
+        ),
     )
     parser.add_argument(
         "--csv",
@@ -253,9 +245,11 @@ def main() -> None:
 
     model, transform, idx_to_class = load_predictor(args.checkpoint, device)
     rows: list[dict[str, object]] = []
+    folder_mode = len(input_paths) == 1 and input_paths[0].is_dir()
+    results_root = input_paths[0] if folder_mode else args.output_dir
 
     for image_path in image_paths:
-        image_output_dir = args.output_dir / image_path.stem
+        image_output_dir = results_root / image_path.stem
         try:
             num_circles, counts, overlay_path = predict_image(
                 model,
@@ -291,7 +285,7 @@ def main() -> None:
             print(f"  color overlay: {overlay_path}")
 
     if not args.no_csv:
-        csv_path = resolve_csv_path(input_paths, args.output_dir, args.csv)
+        csv_path = results_root / args.csv
         write_stats_csv(rows, csv_path)
         print(f"\nCSV report: {csv_path}")
 

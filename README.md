@@ -43,9 +43,9 @@ predict path/to/image.jpg
 predict path/to/folder/
 ```
 
-Training and evaluation load crops from `data/processed/` (held-out split is automatic). Prediction preprocesses each input image and saves classified crops under `outputs/predictions/<image_stem>/{class}/`.
+Training and evaluation load crops from `data/processed/` (held-out split is automatic). Predicting a single image saves classified crops under `outputs/predictions/<image_stem>/{class}/`.
 
-Passing a folder quantifies every image in it and writes `prediction_stats.csv` into that folder (counts and percentages per class, plus a TOTAL row). Use `--csv NAME` to rename the report, or `--no-csv` to skip it.
+Passing a folder quantifies every image in it and writes into that folder: `prediction_stats.csv`, plus per-image `<image_stem>/{class}/` crops and `classified_overlay.jpg`. Use `--csv NAME` to rename the report, or `--no-csv` to skip it.
 
 ## How it works
 
