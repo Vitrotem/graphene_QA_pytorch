@@ -25,6 +25,7 @@ vt-train = "src.train:main"
 vt-eval = "src.evaluate:main"
 vt-predict = "src.predict:main"
 vt-preprocess = "src.preprocess:main"
+vt-to-jpg = "src.to_jpg:main"
 
 [build-system]
 requires = ["poetry-core"]

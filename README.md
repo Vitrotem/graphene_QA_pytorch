@@ -26,6 +26,14 @@ data/
 
 Place source images in `data/raw/{class}/`. Supported formats: `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`
 
+## Convert folder images to JPG
+
+```bash
+to_jpg path/to/folder/
+```
+
+Recursively converts `.png`, `.tif`, `.tiff`, `.jpeg`, `.bmp`, `.webp`, `.gif` to max-quality `.jpg` (quality 100) in place and removes the originals. Existing `.jpg` files are left alone unless you pass `--overwrite`.
+
 ## Preprocess
 
 ```bash
