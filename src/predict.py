@@ -2,6 +2,8 @@
 
 import argparse
 import csv
+import secrets
+import string
 from collections import Counter
 from pathlib import Path
 
@@ -9,13 +11,24 @@ import numpy as np
 import torch
 from PIL import Image
 
+from src.circle_tune_ui import tune_circle_params
 from src.constants import CLASS_NAMES
 from src.dataset import IMAGE_EXTENSIONS, build_transforms
 from src.device import resolve_device
 from src.model import create_model
-from src.preprocessing import CircleCrop, extract_circle_crops, render_classified_overlay
+from src.preprocessing import (
+    CircleCrop,
+    CircleDetectParams,
+    extract_circle_crops,
+    render_classified_overlay,
+)
 
 DEFAULT_CSV_NAME = "prediction_stats.csv"
+_CROP_PREFIX_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def _random_crop_prefix(length: int = 8) -> str:
+    return "".join(secrets.choice(_CROP_PREFIX_ALPHABET) for _ in range(length))
 
 
 def coalesce_image_paths(parts: list[str]) -> list[Path]:
@@ -88,12 +101,16 @@ def predict_image(
     idx_to_class: dict[int, str],
     image_path: Path,
     output_dir: Path | None = None,
+    detect_params: CircleDetectParams | None = None,
+    skip_centers: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None = None,
 ) -> tuple[int, dict[str, int], Path | None]:
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
     gray = np.array(Image.open(image_path).convert("L"))
-    crops = extract_circle_crops(gray)
+    crops = extract_circle_crops(
+        gray, params=detect_params, skip_centers=list(skip_centers) if skip_centers else None
+    )
     if not crops:
         raise ValueError(f"No circles detected in {image_path}")
 
@@ -120,7 +137,8 @@ def predict_image(
             class_dir.mkdir(parents=True, exist_ok=True)
             class_counters[label] += 1
             crop.image.save(
-                class_dir / f"{class_counters[label]:05d}.jpg",
+                class_dir
+                / f"{_random_crop_prefix()}_{class_counters[label]:05d}.jpg",
                 quality=95,
             )
         overlay = render_classified_overlay(gray, classified)
@@ -227,6 +245,11 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Device to use (default: auto)",
     )
+    parser.add_argument(
+        "--no-tune",
+        action="store_true",
+        help="Skip the interactive circle-detection tuner and use defaults",
+    )
     return parser.parse_args()
 
 
@@ -243,13 +266,38 @@ def main() -> None:
     if not image_paths:
         raise FileNotFoundError("No images found in the given path(s)")
 
+    if args.no_tune:
+        detect_params = CircleDetectParams()
+        skipped_centers: tuple[tuple[int, int], ...] = ()
+        print("Using default circle-detection parameters")
+    else:
+        print(f"Tuning circle detection on: {image_paths[0]}")
+        tune_result = tune_circle_params(image_paths[0])
+        if tune_result is None:
+            print("Circle tuning cancelled; aborting prediction.")
+            return
+        detect_params = tune_result.params
+        skipped_centers = tune_result.skipped_centers
+        print(
+            "Circle params: "
+            f"param1={detect_params.param1:.0f}, "
+            f"param2={detect_params.param2:.0f}, "
+            f"min_dist_factor={detect_params.min_dist_factor:.2f}, "
+            f"min_radius_frac={detect_params.min_radius_frac:.3f}, "
+            f"max_radius_frac={detect_params.max_radius_frac:.3f}"
+        )
+        if skipped_centers:
+            print(f"Skipping {len(skipped_centers)} circle(s) on preview image only")
+
     model, transform, idx_to_class = load_predictor(args.checkpoint, device)
     rows: list[dict[str, object]] = []
     folder_mode = len(input_paths) == 1 and input_paths[0].is_dir()
     results_root = input_paths[0] if folder_mode else args.output_dir
+    tuned_image = image_paths[0].resolve()
 
     for image_path in image_paths:
         image_output_dir = results_root / image_path.stem
+        image_skips = skipped_centers if image_path.resolve() == tuned_image else ()
         try:
             num_circles, counts, overlay_path = predict_image(
                 model,
@@ -258,6 +306,8 @@ def main() -> None:
                 idx_to_class,
                 image_path,
                 output_dir=image_output_dir,
+                detect_params=detect_params,
+                skip_centers=image_skips or None,
             )
         except Exception as exc:  # noqa: BLE001 - keep batch quantification running
             print(f"\n{image_path}")

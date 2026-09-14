@@ -21,6 +21,19 @@ INTERIOR_CONTRAST_MIN = 3.0
 HOUGH_PARAM1 = 56
 HOUGH_PARAM2 = 30
 HOUGH_MIN_DIST_FACTOR = 1.8
+MIN_RADIUS_FRAC = 0.04
+MAX_RADIUS_FRAC = 0.12
+
+
+@dataclass(frozen=True)
+class CircleDetectParams:
+    """Tunable Hough circle detection parameters."""
+
+    param1: float = HOUGH_PARAM1
+    param2: float = HOUGH_PARAM2
+    min_dist_factor: float = HOUGH_MIN_DIST_FACTOR
+    min_radius_frac: float = MIN_RADIUS_FRAC
+    max_radius_frac: float = MAX_RADIUS_FRAC
 
 
 @dataclass(frozen=True)
@@ -134,16 +147,19 @@ def _filter_by_regular_spacing(
 
 
 def _run_hough_circles(
-    small: np.ndarray, min_r: int, max_r: int
+    small: np.ndarray,
+    min_r: int,
+    max_r: int,
+    params: CircleDetectParams,
 ) -> list[tuple[float, float, float]]:
     blurred = cv2.GaussianBlur(small, (9, 9), 2)
     circles = cv2.HoughCircles(
         blurred,
         cv2.HOUGH_GRADIENT,
         dp=1.2,
-        minDist=int(min_r * HOUGH_MIN_DIST_FACTOR),
-        param1=HOUGH_PARAM1,
-        param2=HOUGH_PARAM2,
+        minDist=max(1, int(min_r * params.min_dist_factor)),
+        param1=params.param1,
+        param2=params.param2,
         minRadius=min_r,
         maxRadius=max_r,
     )
@@ -152,8 +168,14 @@ def _run_hough_circles(
     return [(float(x), float(y), float(r)) for x, y, r in circles[0]]
 
 
-def detect_circles(gray: np.ndarray) -> list[tuple[int, int, int]]:
+def detect_circles(
+    gray: np.ndarray,
+    params: CircleDetectParams | None = None,
+) -> list[tuple[int, int, int]]:
     """Return list of (x, y, radius) in full-resolution coordinates."""
+    if params is None:
+        params = CircleDetectParams()
+
     h, w = gray.shape
     scale = min(1.0, DETECT_MAX_DIM / max(h, w))
     if scale < 1.0:
@@ -165,10 +187,11 @@ def detect_circles(gray: np.ndarray) -> list[tuple[int, int, int]]:
         scale = 1.0
 
     sh, sw = small.shape
-    min_r = int(min(sh, sw) * 0.04)
-    max_r = int(min(sh, sw) * 0.12)
+    side = min(sh, sw)
+    min_r = max(1, int(side * params.min_radius_frac))
+    max_r = max(min_r + 1, int(side * params.max_radius_frac))
 
-    detected = _run_hough_circles(small, min_r, max_r)
+    detected = _run_hough_circles(small, min_r, max_r, params)
 
     if not detected:
         detected_raw = _detect_circles_contours(small, scale)
@@ -257,14 +280,23 @@ def normalize_and_enhance(
     return result.astype(np.uint8)
 
 
-def extract_circle_crops(gray: np.ndarray) -> list[CircleCrop]:
-    """Detect circles and return one masked, normalized crop per circle."""
+def extract_circle_crops(
+    gray: np.ndarray,
+    params: CircleDetectParams | None = None,
+    skip_centers: list[tuple[int, int]] | None = None,
+) -> list[CircleCrop]:
+    """Detect circles and return one masked, normalized crop per circle.
+
+    Circles whose centers fall near any entry in *skip_centers* are omitted.
+    """
     cropped, _ = crop_metadata(gray)
-    circles = detect_circles(cropped)
+    circles = detect_circles(cropped, params=params)
     h, w = cropped.shape
     crops: list[CircleCrop] = []
 
     for x, y, r in circles:
+        if skip_centers and matches_skip_center(x, y, r, skip_centers):
+            continue
         x0, x1 = max(0, x - r), min(w, x + r)
         y0, y1 = max(0, y - r), min(h, y + r)
         if x1 <= x0 or y1 <= y0:
@@ -286,6 +318,20 @@ def extract_circle_crops(gray: np.ndarray) -> list[CircleCrop]:
         )
 
     return crops
+
+
+def matches_skip_center(
+    x: int,
+    y: int,
+    r: int,
+    skip_centers: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+) -> bool:
+    """True if (x, y) is close to a previously skipped circle center."""
+    thresh = max(10.0, r * 0.6) ** 2
+    for sx, sy in skip_centers:
+        if (x - sx) ** 2 + (y - sy) ** 2 <= thresh:
+            return True
+    return False
 
 
 def render_classified_overlay(
