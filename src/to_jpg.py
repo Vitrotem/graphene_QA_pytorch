@@ -1,6 +1,7 @@
 """Convert all images under a folder (recursively) to max-quality JPEG."""
 
 import argparse
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
@@ -45,7 +46,9 @@ def convert_to_jpg(path: Path, *, overwrite: bool) -> str:
         return "skipped"
 
     try:
-        with Image.open(path) as image:
+        # Read into memory first so Windows can delete the source afterward.
+        raw = path.read_bytes()
+        with Image.open(BytesIO(raw)) as image:
             image.load()
             if image.mode in ("RGBA", "LA") or (
                 image.mode == "P" and "transparency" in image.info
@@ -57,16 +60,19 @@ def convert_to_jpg(path: Path, *, overwrite: bool) -> str:
             else:
                 rgb = image.convert("RGB")
 
-            # Write via a temp sibling when replacing in place to avoid truncating source.
             temp_dest = dest.with_name(dest.stem + ".__tmp__.jpg")
-            rgb.save(temp_dest, format="JPEG", quality=100, optimize=False, subsampling=0)
+            rgb.save(
+                temp_dest,
+                format="JPEG",
+                quality=100,
+                optimize=False,
+                subsampling=0,
+            )
     except OSError as exc:
         return f"error: {exc}"
 
-    if same_path:
-        temp_dest.replace(dest)
-    else:
-        temp_dest.replace(dest)
+    temp_dest.replace(dest)
+    if not same_path:
         path.unlink()
 
     return "converted"
