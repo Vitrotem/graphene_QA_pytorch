@@ -72,8 +72,16 @@ def _draw_circles(
     return Image.fromarray(rgb, mode="RGB"), kept, skipped
 
 
-def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
-    """Show a slider UI for circle detection; return result or None if cancelled."""
+def tune_circle_params(
+    image_path: Path,
+    initial_params: CircleDetectParams | None = None,
+    title_suffix: str = "",
+) -> CircleTuneResult | None:
+    """Show a slider UI for circle detection; return result or None if cancelled.
+
+    *initial_params* seeds the sliders (useful when tuning a batch in sequence).
+    *title_suffix* is appended to the window title (e.g. ``" (2/10)"``).
+    """
     gray = np.array(Image.open(image_path).convert("L"))
     cropped, _ = crop_metadata(gray)
     h, w = cropped.shape
@@ -81,13 +89,14 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
     preview_gray, preview_rgb = _make_preview_base(cropped, display_scale)
     inv_scale = 1.0 / display_scale if display_scale > 0 else 1.0
 
-    defaults = CircleDetectParams()
+    defaults = initial_params if initial_params is not None else CircleDetectParams()
+    reset_defaults = CircleDetectParams()
     result: dict[str, CircleTuneResult | None] = {"value": None}
     skipped_centers: list[tuple[int, int]] = []
     current_circles: list[tuple[int, int, int]] = []
 
     root = tk.Tk()
-    root.title(f"Tune circle detection — {image_path.name}")
+    root.title(f"Tune circle detection — {image_path.name}{title_suffix}")
     root.resizable(True, True)
 
     main = ttk.Frame(root, padding=8)
@@ -240,11 +249,11 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
     buttons.pack(fill=tk.X, pady=(16, 0))
 
     def on_reset() -> None:
-        param1_var.set(defaults.param1)
-        param2_var.set(defaults.param2)
-        min_dist_var.set(defaults.min_dist_factor)
-        min_r_pct_var.set(defaults.min_radius_frac * 100.0)
-        max_r_pct_var.set(defaults.max_radius_frac * 100.0)
+        param1_var.set(reset_defaults.param1)
+        param2_var.set(reset_defaults.param2)
+        min_dist_var.set(reset_defaults.min_dist_factor)
+        min_r_pct_var.set(reset_defaults.min_radius_frac * 100.0)
+        max_r_pct_var.set(reset_defaults.max_radius_frac * 100.0)
         skipped_centers.clear()
         refresh_preview()
 

@@ -266,38 +266,47 @@ def main() -> None:
     if not image_paths:
         raise FileNotFoundError("No images found in the given path(s)")
 
-    if args.no_tune:
-        detect_params = CircleDetectParams()
-        skipped_centers: tuple[tuple[int, int], ...] = ()
-        print("Using default circle-detection parameters")
-    else:
-        print(f"Tuning circle detection on: {image_paths[0]}")
-        tune_result = tune_circle_params(image_paths[0])
-        if tune_result is None:
-            print("Circle tuning cancelled; aborting prediction.")
-            return
-        detect_params = tune_result.params
-        skipped_centers = tune_result.skipped_centers
-        print(
-            "Circle params: "
-            f"param1={detect_params.param1:.0f}, "
-            f"param2={detect_params.param2:.0f}, "
-            f"min_dist_factor={detect_params.min_dist_factor:.2f}, "
-            f"min_radius_frac={detect_params.min_radius_frac:.3f}, "
-            f"max_radius_frac={detect_params.max_radius_frac:.3f}"
-        )
-        if skipped_centers:
-            print(f"Skipping {len(skipped_centers)} circle(s) on preview image only")
-
     model, transform, idx_to_class = load_predictor(args.checkpoint, device)
     rows: list[dict[str, object]] = []
     folder_mode = len(input_paths) == 1 and input_paths[0].is_dir()
     results_root = input_paths[0] if folder_mode else args.output_dir
-    tuned_image = image_paths[0].resolve()
+    last_params = CircleDetectParams()
+    total = len(image_paths)
 
-    for image_path in image_paths:
+    if args.no_tune:
+        print("Using default circle-detection parameters for all images")
+
+    for index, image_path in enumerate(image_paths, start=1):
         image_output_dir = results_root / image_path.stem
-        image_skips = skipped_centers if image_path.resolve() == tuned_image else ()
+
+        if args.no_tune:
+            detect_params = CircleDetectParams()
+            skipped_centers: tuple[tuple[int, int], ...] = ()
+        else:
+            suffix = f" ({index}/{total})" if total > 1 else ""
+            print(f"Tuning circle detection ({index}/{total}): {image_path}")
+            tune_result = tune_circle_params(
+                image_path,
+                initial_params=last_params,
+                title_suffix=suffix,
+            )
+            if tune_result is None:
+                print("Circle tuning cancelled; aborting prediction.")
+                break
+            detect_params = tune_result.params
+            skipped_centers = tune_result.skipped_centers
+            last_params = detect_params
+            print(
+                "  Circle params: "
+                f"param1={detect_params.param1:.0f}, "
+                f"param2={detect_params.param2:.0f}, "
+                f"min_dist_factor={detect_params.min_dist_factor:.2f}, "
+                f"min_radius_frac={detect_params.min_radius_frac:.3f}, "
+                f"max_radius_frac={detect_params.max_radius_frac:.3f}"
+            )
+            if skipped_centers:
+                print(f"  Skipping {len(skipped_centers)} circle(s)")
+
         try:
             num_circles, counts, overlay_path = predict_image(
                 model,
@@ -307,7 +316,7 @@ def main() -> None:
                 image_path,
                 output_dir=image_output_dir,
                 detect_params=detect_params,
-                skip_centers=image_skips or None,
+                skip_centers=skipped_centers or None,
             )
         except Exception as exc:  # noqa: BLE001 - keep batch quantification running
             print(f"\n{image_path}")
