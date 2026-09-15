@@ -19,7 +19,7 @@ from src.preprocessing import (
 )
 
 PREVIEW_MAX_DIM = 900
-DEBOUNCE_MS = 80
+DEBOUNCE_MS = 50
 KEEP_COLOR = (0, 220, 0)
 SKIP_COLOR = (220, 40, 40)
 
@@ -32,15 +32,30 @@ class CircleTuneResult:
     skipped_centers: tuple[tuple[int, int], ...]
 
 
-def _build_preview(
-    cropped: np.ndarray,
-    params: CircleDetectParams,
-    display_scale: float,
+def _make_preview_base(
+    cropped: np.ndarray, display_scale: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Downscale once for detection + drawing; return (preview_gray, preview_rgb)."""
+    if display_scale < 1.0:
+        h, w = cropped.shape
+        preview_gray = cv2.resize(
+            cropped,
+            (int(w * display_scale), int(h * display_scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        preview_gray = cropped
+    preview_rgb = cv2.cvtColor(preview_gray, cv2.COLOR_GRAY2RGB)
+    return preview_gray, preview_rgb
+
+
+def _draw_circles(
+    base_rgb: np.ndarray,
+    circles: list[tuple[int, int, int]],
     skipped_centers: list[tuple[int, int]],
-) -> tuple[Image.Image, list[tuple[int, int, int]], int, int]:
-    circles = detect_circles(cropped, params=params)
-    rgb = cv2.cvtColor(cropped, cv2.COLOR_GRAY2RGB)
-    thickness = max(1, int(round(2 / display_scale))) if display_scale > 0 else 2
+) -> tuple[Image.Image, int, int]:
+    rgb = base_rgb.copy()
+    thickness = 2
     kept = 0
     skipped = 0
     for x, y, r in circles:
@@ -49,21 +64,12 @@ def _build_preview(
         cv2.circle(rgb, (x, y), r, color, thickness)
         if is_skipped:
             skipped += 1
-            # Mark skipped with a small cross at the center
             arm = max(3, r // 5)
             cv2.line(rgb, (x - arm, y - arm), (x + arm, y + arm), SKIP_COLOR, thickness)
             cv2.line(rgb, (x - arm, y + arm), (x + arm, y - arm), SKIP_COLOR, thickness)
         else:
             kept += 1
-
-    if display_scale < 1.0:
-        h, w = rgb.shape[:2]
-        rgb = cv2.resize(
-            rgb,
-            (int(w * display_scale), int(h * display_scale)),
-            interpolation=cv2.INTER_AREA,
-        )
-    return Image.fromarray(rgb, mode="RGB"), circles, kept, skipped
+    return Image.fromarray(rgb, mode="RGB"), kept, skipped
 
 
 def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
@@ -72,6 +78,8 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
     cropped, _ = crop_metadata(gray)
     h, w = cropped.shape
     display_scale = min(1.0, PREVIEW_MAX_DIM / max(h, w))
+    preview_gray, preview_rgb = _make_preview_base(cropped, display_scale)
+    inv_scale = 1.0 / display_scale if display_scale > 0 else 1.0
 
     defaults = CircleDetectParams()
     result: dict[str, CircleTuneResult | None] = {"value": None}
@@ -134,39 +142,46 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
             max_radius_frac=float(max_frac),
         )
 
-    def refresh_preview() -> None:
-        nonlocal current_circles
-        params = current_params()
-        preview, circles, kept, skipped = _build_preview(
-            cropped, params, display_scale, skipped_centers
-        )
-        current_circles = circles
-        photo = ImageTk.PhotoImage(preview)
-        photo_ref[0] = photo
-        preview_label.configure(image=photo)
-        count_var.set(f"Circles: {kept} kept, {skipped} skipped")
+    def update_value_labels(params: CircleDetectParams) -> None:
         value_labels["param1"].set(f"{params.param1:.0f}")
         value_labels["param2"].set(f"{params.param2:.0f}")
         value_labels["min_dist"].set(f"{params.min_dist_factor:.2f}")
         value_labels["min_r"].set(f"{params.min_radius_frac * 100:.1f}")
         value_labels["max_r"].set(f"{params.max_radius_frac * 100:.1f}")
 
+    def apply_overlay(circles: list[tuple[int, int, int]]) -> None:
+        preview, kept, skipped = _draw_circles(
+            preview_rgb, circles, skipped_centers
+        )
+        photo = ImageTk.PhotoImage(preview)
+        photo_ref[0] = photo
+        preview_label.configure(image=photo)
+        count_var.set(f"Circles: {kept} kept, {skipped} skipped")
+
+    def refresh_preview(*, redetect: bool = True) -> None:
+        nonlocal current_circles
+        params = current_params()
+        update_value_labels(params)
+        if redetect:
+            current_circles = detect_circles(preview_gray, params=params)
+        apply_overlay(current_circles)
+
     def schedule_refresh(*_args: object) -> None:
+        update_value_labels(current_params())
         if debounce_id[0] is not None:
             root.after_cancel(debounce_id[0])
         debounce_id[0] = root.after(DEBOUNCE_MS, refresh_preview)
 
     def on_preview_click(event: tk.Event) -> None:
-        if display_scale <= 0 or not current_circles:
+        if not current_circles:
             return
-        full_x = event.x / display_scale
-        full_y = event.y / display_scale
+        # Preview image is already display-sized, so event coords match circles.
+        px, py = float(event.x), float(event.y)
 
         best: tuple[int, int, int] | None = None
         best_dist = float("inf")
         for x, y, r in current_circles:
-            dist = ((full_x - x) ** 2 + (full_y - y) ** 2) ** 0.5
-            # Allow clicking slightly outside the rim
+            dist = ((px - x) ** 2 + (py - y) ** 2) ** 0.5
             if dist <= r * 1.15 and dist < best_dist:
                 best = (x, y, r)
                 best_dist = dist
@@ -175,7 +190,6 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
             return
 
         bx, by, br = best
-        # Toggle: remove matching skip, or add this center
         matched_idx = None
         for i, (sx, sy) in enumerate(skipped_centers):
             if matches_skip_center(bx, by, br, [(sx, sy)]):
@@ -185,7 +199,7 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
             skipped_centers.pop(matched_idx)
         else:
             skipped_centers.append((bx, by))
-        refresh_preview()
+        refresh_preview(redetect=False)
 
     def add_slider(
         row: int,
@@ -235,9 +249,14 @@ def tune_circle_params(image_path: Path) -> CircleTuneResult | None:
         refresh_preview()
 
     def on_ok() -> None:
+        # Map preview-space skip centers back to full-resolution crop coords.
+        full_skips = tuple(
+            (int(round(sx * inv_scale)), int(round(sy * inv_scale)))
+            for sx, sy in skipped_centers
+        )
         result["value"] = CircleTuneResult(
             params=current_params(),
-            skipped_centers=tuple(skipped_centers),
+            skipped_centers=full_skips,
         )
         root.destroy()
 

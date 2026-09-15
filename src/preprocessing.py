@@ -82,17 +82,27 @@ def _filter_by_interior_brightness(
     for x, y, r in circles:
         if r < 3:
             continue
-        inner = np.zeros((h, w), dtype=np.uint8)
-        ring = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(inner, (x, y), max(1, int(r * 0.65)), 255, thickness=-1)
-        cv2.circle(ring, (x, y), int(r * 1.35), 255, thickness=-1)
-        cv2.circle(ring, (x, y), int(r * 1.05), 0, thickness=-1)
-
-        inner_vals = gray[inner > 0]
-        ring_vals = gray[ring > 0]
-        if inner_vals.size == 0 or ring_vals.size == 0:
+        # Restrict masks to a local ROI — full-image masks per circle are too slow.
+        pad = int(r * 1.35) + 1
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(w, x + pad + 1), min(h, y + pad + 1)
+        if x1 <= x0 or y1 <= y0:
             continue
-        contrast = float(inner_vals.mean()) - float(ring_vals.mean())
+
+        roi = gray[y0:y1, x0:x1]
+        rh, rw = roi.shape
+        lx, ly = x - x0, y - y0
+        inner = np.zeros((rh, rw), dtype=np.uint8)
+        ring = np.zeros((rh, rw), dtype=np.uint8)
+        cv2.circle(inner, (lx, ly), max(1, int(r * 0.65)), 255, thickness=-1)
+        cv2.circle(ring, (lx, ly), int(r * 1.35), 255, thickness=-1)
+        cv2.circle(ring, (lx, ly), int(r * 1.05), 0, thickness=-1)
+
+        if cv2.countNonZero(inner) == 0 or cv2.countNonZero(ring) == 0:
+            continue
+        inner_mean = cv2.mean(roi, mask=inner)[0]
+        ring_mean = cv2.mean(roi, mask=ring)[0]
+        contrast = float(inner_mean) - float(ring_mean)
         if contrast >= min_contrast:
             filtered.append((x, y, r))
 
